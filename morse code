@@ -1,0 +1,70 @@
+// RGB LED pins
+const int redPin = 9;    // Red pin
+const int greenPin = 10; // Green pin
+const int bluePin = 11;  // Blue pin
+
+// Morse code timing (in milliseconds)
+const int dotDuration = 400;    // Dot length (short blink)
+const int dashDuration = 1200;  // Dash length (long blink)
+const int symbolPause = 600;    // Pause between symbols
+const int digitPause = 1200;    // Pause between digits
+const int indicatorDuration = 1000; // Green light duration
+const int sequencePause = 3000; // Pause before resetting
+
+void setup() {
+  pinMode(redPin, OUTPUT);
+  pinMode(greenPin, OUTPUT);
+  pinMode(bluePin, OUTPUT);
+}
+
+void loop() {
+  // Morse code for "1" (".----")
+  playMorse(".----");
+  showGreenIndicator();
+
+  // Morse code for "4" ("....-")
+  playMorse("....-");
+  showGreenIndicator();
+
+  // Morse code for "3" ("...--")
+  playMorse("...--");
+
+  // Turn on RED LED to indicate reset
+  setColor(255, 0, 0); // Red light for 3 seconds
+  delay(sequencePause);
+  setColor(0, 0, 0);   // Turn off RGB LED
+}
+
+// Function to play Morse code
+void playMorse(String code) {
+  for (int i = 0; i < code.length(); i++) {
+    if (code[i] == '.') {
+      flash(dotDuration);  // Dot (short blink)
+    } else if (code[i] == '-') {
+      flash(dashDuration); // Dash (long blink)
+    }
+    delay(symbolPause);    // Pause between symbols
+  }
+}
+
+// Flash the LED for a specific duration (white light for Morse code)
+void flash(int duration) {
+  setColor(255, 255, 255);  // White light for Morse code
+  delay(duration);
+  setColor(0, 0, 0);        // LED off
+}
+
+// Flash green indicator between numbers
+void showGreenIndicator() {
+  setColor(0, 255, 0);      // Green light
+  delay(indicatorDuration);
+  setColor(0, 0, 0);        // Turn off
+  delay(digitPause);        // Pause before next number
+}
+
+// Function to set RGB LED color
+void setColor(int red, int green, int blue) {
+  analogWrite(redPin, red);
+  analogWrite(greenPin, green);
+  analogWrite(bluePin, blue);
+}
