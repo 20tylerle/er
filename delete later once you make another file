@@ -1,0 +1,2126 @@
+- This is everything in the src folder 
+commands folder contains core.js, reminders.js, and todos.js files. 
+index.js file 
+projects.js file
+scheduler.js file 
+state.js file
+
+-after these are the file outside of the src file (there is more, but here the main one we have been working on)
+.env file 
+test-ai.js 
+
+- I will now give you all the codes in all the files listed
+-core.js
+export function createCoreCommands({
+    // projects
+    PROJECTS_ROOT,
+    buildProjectsMap,
+    setProjects, // (map) => void
+    getProjects, // () => map
+  
+    // shell actions
+    openPath,
+    runShell,
+  
+    // misc
+    nowString,
+  }) {
+    return [
+      {
+        id: "help",
+        names: ["help", "?", "commands"],
+        description: "Show available commands",
+        parseArgs: () => ({}),
+        run: async () => {
+          // help needs COMMANDS length; we’ll generate help in index.js instead.
+          return `Type: help (handled in index.js).`; // placeholder (we’ll replace in 1 minute)
+        },
+      },
+  
+      {
+        id: "time",
+        names: ["time", "date", "now"],
+        description: "Print current date/time",
+        parseArgs: () => ({}),
+        run: async () => `It is ${nowString()}.`,
+      },
+  
+      {
+        id: "projects",
+        names: ["projects", "list projects"],
+        description: "List detected projects",
+        parseArgs: () => ({}),
+        run: async () => {
+          const map = buildProjectsMap(PROJECTS_ROOT);
+          setProjects(map);
+  
+          const keys = Object.keys(map).sort();
+          if (keys.length === 0) {
+            return `No projects found.\nPROJECTS_ROOT = ${PROJECTS_ROOT}`;
+          }
+          return `Detected projects:\n- ${keys.join("\n- ")}`;
+        },
+      },
+  
+      {
+        id: "open_project",
+        names: ["open", "open project", "o"],
+        description: "Open a project folder (usage: open <name>)",
+        parseArgs: (tokens) => ({ projectName: tokens[tokens.length - 1] }),
+        run: async ({ projectName }) => {
+          const map = buildProjectsMap(PROJECTS_ROOT);
+          setProjects(map);
+  
+          const key = (projectName || "").toLowerCase();
+          const target = map[key];
+  
+          if (!target) {
+            const available = Object.keys(map).sort().slice(0, 20).join(", ");
+            return `Unknown project "${projectName}". Try "projects".\nAvailable (first 20): ${available}`;
+          }
+  
+          await openPath(target);
+          return `Opened project "${key}".`;
+        },
+      },
+  
+      {
+        id: "code_project",
+        names: ["code", "code project"],
+        description: "Open a project in VS Code (usage: code <name>)",
+        parseArgs: (tokens) => ({ projectName: tokens[tokens.length - 1] }),
+        run: async ({ projectName }) => {
+          const map = buildProjectsMap(PROJECTS_ROOT);
+          setProjects(map);
+  
+          const key = (projectName || "").toLowerCase();
+          const target = map[key];
+  
+          if (!target) {
+            const available = Object.keys(map).sort().slice(0, 20).join(", ");
+            return `Unknown project "${projectName}". Try "projects".\nAvailable (first 20): ${available}`;
+          }
+  
+          await runShell(`code "${target}"`);
+          return `Opened "${key}" in VS Code.`;
+        },
+      },
+    ];
+  }
+  
+-reminders.js
+
+function parseMinutes(str) {
+    const n = Number(str);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.round(n);
+  }
+  
+  function parseDateTimeLocal(raw) {
+    const s = raw.trim().replace("T", " ");
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
+    if (!m) return null;
+  
+    const [_, Y, Mo, D, H, Mi] = m;
+    const dt = new Date(
+      Number(Y),
+      Number(Mo) - 1,
+      Number(D),
+      Number(H),
+      Number(Mi),
+      0,
+      0
+    );
+  
+    const ms = dt.getTime();
+    if (Number.isNaN(ms)) return null;
+    return ms;
+  }
+  
+  export function listReminders(state, formatWhen) {
+    if (state.reminders.length === 0) return "No reminders yet.";
+    const lines = state.reminders
+      .slice()
+      .sort((a, b) => a.dueAt - b.dueAt)
+      .map((r, i) => {
+        const overdue = !r.fired && r.dueAt <= Date.now();
+        const status = r.fired ? "✅ fired" : overdue ? "⚠️ overdue" : "⏳ pending";
+        return `${i + 1}. [${status}] ${r.text} — ${formatWhen(r.dueAt)}`;
+      });
+    return lines.join("\n");
+  }
+  
+  export function createReminderCommands({ getState, persist, nextId, scheduler }) {
+    return [
+      {
+        id: "remind_in",
+        names: ["remind in"],
+        description: "Set a reminder in N minutes (usage: remind in <minutes> <text>)",
+        parseArgs: (tokens, raw) => {
+          const parts = raw.trim().split(/\s+/);
+          const minutes = parseMinutes(parts[2]); // ["remind","in","20",...]
+          const text = parts.slice(3).join(" ").trim();
+          return { minutes, text };
+        },
+        run: async ({ minutes, text }) => {
+          if (!minutes) return `Missing minutes. Example: remind in 20 take pizza out`;
+          if (!text) return `Missing reminder text. Example: remind in 20 take pizza out`;
+  
+          const state = getState();
+          const rem = {
+            id: nextId("rem"),
+            text,
+            dueAt: Date.now() + minutes * 60 * 1000,
+            createdAt: Date.now(),
+            fired: false,
+          };
+  
+          state.reminders.push(rem);
+          persist();
+          scheduler.scheduleReminder(rem);
+  
+          return `Reminder set for ${minutes} minute(s) from now: "${text}"`;
+        },
+      },
+      {
+        id: "remind_at",
+        names: ["remind at"],
+        description: "Set a reminder at YYYY-MM-DD HH:MM (usage: remind at 2026-01-10 09:00 call mom)",
+        parseArgs: (tokens, raw) => {
+          const stripped = raw.replace(/^remind at\s+/i, "").trim();
+          const whenPart = stripped.slice(0, 16);
+          const text = stripped.slice(16).trim();
+          const dueAt = parseDateTimeLocal(whenPart);
+          return { dueAt, text };
+        },
+        run: async ({ dueAt, text }) => {
+          if (!dueAt) return `Bad time format. Use: remind at 2026-01-10 09:00 call mom`;
+          if (!text) return `Missing reminder text. Example: remind at 2026-01-10 09:00 call mom`;
+  
+          const state = getState();
+          const rem = {
+            id: nextId("rem"),
+            text,
+            dueAt,
+            createdAt: Date.now(),
+            fired: false,
+          };
+  
+          state.reminders.push(rem);
+          persist();
+          scheduler.scheduleReminder(rem);
+  
+          return `Reminder set for ${scheduler.formatWhen(dueAt)}: "${text}"`;
+        },
+      },
+      {
+        id: "reminders",
+        names: ["reminders", "list reminders"],
+        description: "List reminders",
+        parseArgs: () => ({}),
+        run: async () => {
+          const state = getState();
+          return listReminders(state, scheduler.formatWhen);
+        },
+      },
+      {
+        id: "reminder_delete",
+        names: ["reminder delete", "delete reminder"],
+        description: "Delete a reminder (usage: reminder delete <number>)",
+        parseArgs: (tokens) => {
+          const n = Number(tokens[tokens.length - 1]);
+          return { index: Number.isFinite(n) ? n : null };
+        },
+        run: async ({ index }) => {
+          if (!index || index <= 0) return `Give a reminder number. Example: reminder delete 1`;
+  
+          const state = getState();
+          const sorted = state.reminders.slice().sort((a, b) => a.dueAt - b.dueAt);
+          const r = sorted[index - 1];
+          if (!r) return `Reminder #${index} not found.`;
+  
+          scheduler.cancelReminderById(r.id);
+          state.reminders = state.reminders.filter((x) => x.id !== r.id);
+          persist();
+  
+          return `Deleted reminder: "${r.text}"`;
+        },
+      },
+    ];
+  }
+  
+
+-todos.js
+
+export function listTodos(state) {
+    if (state.todos.length === 0) return "No todos yet.";
+    const lines = state.todos
+      .slice()
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((t, i) => {
+        const status = t.done ? "✅" : "⬜️";
+        return `${i + 1}. ${status} ${t.text}`;
+      });
+    return lines.join("\n");
+  }
+  
+  export function createTodoCommands({ getState, persist, nextId }) {
+    return [
+      {
+        id: "todo_add",
+        names: ["todo add", "add todo"],
+        description: "Add a todo (usage: todo add <text>)",
+        parseArgs: (tokens, raw) => {
+          const text = raw.replace(/^todo add\s+/i, "").replace(/^add todo\s+/i, "").trim();
+          return { text };
+        },
+        run: async ({ text }) => {
+          if (!text) return `Missing todo text. Example: todo add apply for jobs`;
+  
+          const state = getState();
+          state.todos.push({
+            id: nextId("todo"),
+            text,
+            done: false,
+            createdAt: Date.now(),
+            doneAt: null,
+          });
+          persist();
+          return `Added todo: "${text}"`;
+        },
+      },
+      {
+        id: "todos",
+        names: ["todos", "todo list"],
+        description: "List todos",
+        parseArgs: () => ({}),
+        run: async () => {
+          const state = getState();
+          return listTodos(state);
+        },
+      },
+      {
+        id: "todo_done",
+        names: ["todo done", "done todo", "todo complete"],
+        description: "Mark a todo done by number (usage: todo done <number>)",
+        parseArgs: (tokens) => {
+          const n = Number(tokens[tokens.length - 1]);
+          return { index: Number.isFinite(n) ? n : null };
+        },
+        run: async ({ index }) => {
+          if (!index || index <= 0) return `Give a todo number. Example: todo done 1`;
+  
+          const state = getState();
+          const ordered = state.todos.slice().sort((a, b) => a.createdAt - b.createdAt);
+          const t = ordered[index - 1];
+          if (!t) return `Todo #${index} not found.`;
+  
+          const real = state.todos.find((x) => x.id === t.id);
+          if (!real) return `Todo #${index} not found.`;
+  
+          real.done = true;
+          real.doneAt = Date.now();
+          persist();
+          return `Marked done: "${real.text}"`;
+        },
+      },
+      {
+        id: "todo_delete",
+        names: ["todo delete", "delete todo", "todo remove", "remove todo"],
+        description: "Delete a todo by number (usage: todo delete <number>)",
+        parseArgs: (tokens) => {
+          const n = Number(tokens[tokens.length - 1]);
+          return { index: Number.isFinite(n) ? n : null };
+        },
+        run: async ({ index }) => {
+          if (!index || index <= 0) return `Give a todo number. Example: todo delete 2`;
+  
+          const state = getState();
+          const ordered = state.todos.slice().sort((a, b) => a.createdAt - b.createdAt);
+          const t = ordered[index - 1];
+          if (!t) return `Todo #${index} not found.`;
+  
+          state.todos = state.todos.filter((x) => x.id !== t.id);
+          persist();
+          return `Deleted todo: "${t.text}"`;
+        },
+      },
+      {
+        id: "todo_edit",
+        names: ["todo edit", "edit todo"],
+        description: "Edit a todo (usage: todo edit <number> <new text>)",
+        parseArgs: (tokens, raw) => {
+          let stripped = raw.replace(/^todo edit\s+/i, "").trim();
+          stripped = stripped.replace(/^edit todo\s+/i, "").trim();
+  
+          const firstSpace = stripped.indexOf(" ");
+          if (firstSpace === -1) return { index: null, text: "" };
+  
+          const indexStr = stripped.slice(0, firstSpace).trim();
+          const text = stripped.slice(firstSpace + 1).trim();
+  
+          const index = Number(indexStr);
+          return { index: Number.isFinite(index) ? index : null, text };
+        },
+        run: async ({ index, text }) => {
+          if (!index || index <= 0) return `Give a todo number. Example: todo edit 2 buy milk`;
+          if (!text) return `Missing new text. Example: todo edit 2 buy milk`;
+  
+          const state = getState();
+          const ordered = state.todos.slice().sort((a, b) => a.createdAt - b.createdAt);
+          const t = ordered[index - 1];
+          if (!t) return `Todo #${index} not found.`;
+  
+          const real = state.todos.find((x) => x.id === t.id);
+          if (!real) return `Todo #${index} not found.`;
+  
+          const old = real.text;
+          real.text = text;
+          persist();
+  
+          return `Updated todo #${index}:\n- Before: "${old}"\n- After:  "${text}"`;
+        },
+      },
+      {
+        id: "todo_clear_done",
+        names: ["todo clear done", "clear done"],
+        description: "Remove completed todos",
+        parseArgs: () => ({}),
+        run: async () => {
+          const state = getState();
+          const before = state.todos.length;
+          state.todos = state.todos.filter((t) => !t.done);
+          const after = state.todos.length;
+          persist();
+          return `Cleared ${before - after} completed todo(s).`;
+        },
+      },
+      // Safe clear-all (two-step)
+      {
+        id: "todo_clear_all",
+        names: ["todo clear all", "clear todos"],
+        description: "Delete ALL todos (asks for confirm)",
+        parseArgs: () => ({}),
+        run: async () => {
+          const state = getState();
+          const count = state.todos.length;
+          if (count === 0) return "Todo list already empty.";
+          return `To clear ALL ${count} todos, type: clear todos confirm`;
+        },
+      },
+      {
+        id: "todo_clear_all_confirm",
+        names: ["clear todos confirm", "todo clear all confirm"],
+        description: "Confirm delete ALL todos",
+        parseArgs: () => ({}),
+        run: async () => {
+          const state = getState();
+          const count = state.todos.length;
+          if (count === 0) return "Todo list already empty.";
+          state.todos = [];
+          persist();
+          return `Cleared all ${count} todos.`;
+        },
+      },
+      // Internal “by text” (for natural language)
+      {
+        id: "todo_done_text",
+        names: ["todo done text"],
+        description: "Mark a todo done by matching text (internal)",
+        parseArgs: (tokens, raw) => {
+          const text = raw.replace(/^todo done text\s+/i, "").trim();
+          return { text };
+        },
+        run: async ({ text }) => {
+          if (!text) return `Tell me which todo to mark done.`;
+  
+          const state = getState();
+          const needle = text.toLowerCase();
+          const match = state.todos.find(
+            (t) => !t.done && t.text.toLowerCase().includes(needle)
+          );
+          if (!match) return `I couldn't find an unfinished todo matching: "${text}". Try "todos".`;
+  
+          match.done = true;
+          match.doneAt = Date.now();
+          persist();
+          return `Marked done: "${match.text}"`;
+        },
+      },
+      {
+        id: "todo_delete_text",
+        names: ["todo delete text"],
+        description: "Delete a todo by matching text (internal)",
+        parseArgs: (tokens, raw) => {
+          const text = raw.replace(/^todo delete text\s+/i, "").trim();
+          return { text };
+        },
+        run: async ({ text }) => {
+          if (!text) return `Tell me which todo to delete.`;
+  
+          const state = getState();
+          const needle = text.toLowerCase();
+          const match = state.todos.find((t) => t.text.toLowerCase().includes(needle));
+          if (!match) return `I couldn't find a todo matching: "${text}". Try "todos".`;
+  
+          state.todos = state.todos.filter((t) => t.id !== match.id);
+          persist();
+          return `Deleted todo: "${match.text}"`;
+        },
+      },
+    ];
+  }
+  
+
+-index.js
+
+import dotenv from "dotenv";
+import OpenAI from "openai";
+import readline from "readline";
+import { exec } from "child_process";
+import os from "os";
+import fs from "fs";
+import path from "path";
+
+import { ensureDataDir, loadState, saveState, nextId } from "./state.js";
+import { createTodoCommands } from "./commands/todos.js";
+import { createScheduler } from "./scheduler.js";
+import { createReminderCommands } from "./commands/reminders.js";
+import { createCoreCommands } from "./commands/core.js";
+
+dotenv.config();
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+/* =========================
+   CONFIG
+   ========================= */
+
+const PROJECTS_ROOT = "/Users/newowner/Desktop/All Projects";
+
+// persistent storage
+const DATA_DIR = path.join(process.cwd(), "data");
+const STATE_PATH = path.join(DATA_DIR, "jarvis_state.json");
+ensureDataDir(DATA_DIR);
+
+let state = loadState(STATE_PATH);
+
+function persist() {
+  saveState(STATE_PATH, state);
+}
+function getState() {
+  return state;
+}
+
+/* =========================
+   PROJECT AUTO-DETECT
+   ========================= */
+
+function buildProjectsMap(rootDir) {
+  const map = {};
+  if (!fs.existsSync(rootDir)) return map;
+
+  const entries = fs.readdirSync(rootDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const folderName = entry.name;
+    const key = folderName.toLowerCase();
+    const fullPath = path.join(rootDir, folderName);
+
+    map[key] = fullPath;
+
+    // Friendly aliases (customize later if you want)
+    if (key.includes("poker") || key.includes("lobby")) map["poker"] = fullPath;
+    if (key.includes("jarvis")) map["jarvis"] = fullPath;
+    if (key.includes("burner") || key.includes("journal")) map["journal"] = fullPath;
+  }
+
+  return map;
+}
+
+let PROJECTS = buildProjectsMap(PROJECTS_ROOT);
+function setProjects(map) {
+  PROJECTS = map;
+}
+function getProjects() {
+  return PROJECTS;
+}
+
+/* =========================
+   PERSONALITY + SESSION MEMORY
+   ========================= */
+
+const JARVIS_SYSTEM_PROMPT = `
+You are Jarvis: a calm, clever, efficient personal assistant.
+Rules:
+- Keep responses concise by default.
+- Prefer commands when user intent is actionable (projects, reminders, todos).
+- Never claim you did something unless a command actually ran.
+- If asked for unsafe/illegal actions, refuse and offer safer alternatives.
+`;
+
+const chatHistory = [{ role: "system", content: JARVIS_SYSTEM_PROMPT }];
+
+/* =========================
+   SHELL HELPERS
+   ========================= */
+
+function runShell(cmd) {
+  return new Promise((resolve, reject) => {
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) return reject(new Error((stderr || error.message || "").trim()));
+      resolve((stdout || stderr || "").trim());
+    });
+  });
+}
+
+function openPath(targetPath) {
+  const platform = os.platform();
+  const quoted = `"${targetPath}"`;
+  if (platform === "darwin") return runShell(`open ${quoted}`);
+  if (platform === "win32") return runShell(`start "" ${quoted}`);
+  return runShell(`xdg-open ${quoted}`);
+}
+
+function nowString() {
+  return new Date().toLocaleString();
+}
+
+/* =========================
+   SCHEDULER (module)
+   ========================= */
+
+const scheduler = createScheduler({ getState, persist });
+scheduler.scheduleAllReminders();
+
+/* =========================
+   PARSING HELPERS (generic)
+   ========================= */
+
+function normalize(s) {
+  return s.trim().toLowerCase();
+}
+function tokenize(raw) {
+  return normalize(raw).split(/\s+/).filter(Boolean);
+}
+
+/* =========================
+   COMMANDS (BUILT IN LAYERS)
+   ========================= */
+
+const COMMANDS = [];
+
+// 1) Core (projects/open/code/time) from module
+COMMANDS.push(
+  ...createCoreCommands({
+    PROJECTS_ROOT,
+    buildProjectsMap,
+    setProjects,
+    getProjects,
+    openPath,
+    runShell,
+    nowString,
+  })
+);
+
+// 2) Help LAST (so it lists everything, including module commands)
+COMMANDS.push({
+  id: "help",
+  names: ["help", "?", "commands"],
+  description: "Show available commands",
+  parseArgs: () => ({}),
+  run: async () => {
+    const lines = COMMANDS.map((c) => `- ${c.names[0]}: ${c.description}`);
+    return `Available commands:\n${lines.join("\n")}\n\nSpecial: exit, reset`;
+  },
+});
+
+// 3) Todos from module
+COMMANDS.push(
+  ...createTodoCommands({
+    getState,
+    persist,
+    nextId,
+  })
+);
+
+// 4) Reminders from module
+COMMANDS.push(
+  ...createReminderCommands({
+    getState,
+    persist,
+    nextId,
+    scheduler,
+  })
+);
+
+/* =========================
+   COMMAND MATCHING
+   ========================= */
+
+function matchCommand(raw) {
+  const text = normalize(raw);
+
+  const allAliases = COMMANDS.flatMap((c) =>
+    c.names.map((n) => ({ cmd: c, alias: n }))
+  ).sort((a, b) => b.alias.length - a.alias.length);
+
+  for (const { cmd, alias } of allAliases) {
+    if (text === alias) return { cmd };
+    if (text.startsWith(alias + " ")) return { cmd };
+  }
+  return null;
+}
+
+/* =========================
+   AI ROUTER (Natural Language → Command)
+   ========================= */
+
+async function routeNaturalLanguage(userText) {
+  PROJECTS = buildProjectsMap(PROJECTS_ROOT);
+
+  const commandSchema = COMMANDS.map((c) => {
+    let argsExample = {};
+
+    // projects
+    if (c.id === "open_project") argsExample = { projectName: "jarvis" };
+    else if (c.id === "code_project") argsExample = { projectName: "jarvis" };
+
+    // todos
+    else if (c.id === "todo_add") argsExample = { text: "apply for jobs" };
+    else if (c.id === "todos") argsExample = {};
+    else if (c.id === "todo_done") argsExample = { index: 2 };
+    else if (c.id === "todo_delete") argsExample = { index: 3 };
+    else if (c.id === "todo_edit") argsExample = { index: 2, text: "work on poker bug" };
+    else if (c.id === "todo_done_text") argsExample = { text: "poker" };
+    else if (c.id === "todo_delete_text") argsExample = { text: "jobs" };
+
+    // reminders
+    else if (c.id === "remind_in") argsExample = { minutes: 20, text: "take pizza out" };
+    else if (c.id === "remind_at") argsExample = { dueAt: Date.now() + 3600000, text: "call mom" };
+    else if (c.id === "reminders") argsExample = {};
+    else if (c.id === "reminder_delete") argsExample = { index: 1 };
+
+    return {
+      id: c.id,
+      names: c.names,
+      description: c.description,
+      argsExample,
+    };
+  });
+
+  const routerSystem = `
+You are a command router for a local assistant.
+Return ONLY valid JSON. No markdown.
+
+Pick the best command from the allowed list or "none".
+Never invent project names beyond the provided list.
+
+TODOS:
+- Add a todo => "todo_add" {"text":"..."}
+- List todos => "todos"
+- If user references a number => "todo_done"/"todo_delete"/"todo_edit" with {"index":N}
+- If user references a todo by keywords (no number):
+  - mark done => "todo_done_text" {"text":"<keywords>"}
+  - delete => "todo_delete_text" {"text":"<keywords>"}
+
+REMINDERS:
+- "in X minutes" => "remind_in" {"minutes":X,"text":"..."}
+- strict time "YYYY-MM-DD HH:MM" => "remind_at" {"dueAt":<ms>,"text":"..."} OR return none if you can't compute ms
+- list => "reminders"
+- delete reminder number => "reminder_delete" {"index":N}
+
+If user asks to do something not covered, return {"commandId":"none"}.
+`;
+
+  const routerUser = {
+    userText,
+    availableProjects: Object.keys(PROJECTS),
+    commands: commandSchema,
+  };
+
+  const resp = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: routerSystem },
+      { role: "user", content: JSON.stringify(routerUser) },
+    ],
+  });
+
+  const raw = resp.choices[0].message.content.trim();
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return { commandId: "none" };
+    if (!parsed.commandId) return { commandId: "none" };
+    return parsed;
+  } catch {
+    return { commandId: "none" };
+  }
+}
+
+/* =========================
+   EXECUTION
+   ========================= */
+
+async function runCommand(cmd, raw) {
+  const tokens = tokenize(raw);
+  const args = cmd.parseArgs(tokens, raw);
+  try {
+    const out = await cmd.run(args);
+    return `\nJarvis: ${out}\n`;
+  } catch (err) {
+    return `\nJarvis: Command failed.\n${String(err.message || err)}\n`;
+  }
+}
+
+async function chatWithJarvis(userText) {
+  chatHistory.push({ role: "user", content: userText });
+  try {
+    const resp = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: chatHistory,
+    });
+    const reply = resp.choices[0].message.content;
+    chatHistory.push({ role: "assistant", content: reply });
+    console.log(`\nJarvis: ${reply}\n`);
+  } catch (err) {
+    console.error("Jarvis chat error:", err.message);
+    chatHistory.pop();
+  }
+}
+
+/* =========================
+   MAIN LOOP
+   ========================= */
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+console.log("Jarvis online (src/index.js).");
+console.log("Try: help | projects | open jarvis | todos | remind in 5 stretch");
+console.log("Special: exit | reset\n");
+
+function loop() {
+  rl.question("You: ", async (raw) => {
+    const input = raw.trim();
+    if (!input) return loop();
+
+    const low = input.toLowerCase();
+
+    if (low === "exit") {
+      console.log("Jarvis shutting down.");
+      rl.close();
+      return;
+    }
+
+    if (low === "reset") {
+      chatHistory.length = 0;
+      chatHistory.push({ role: "system", content: JARVIS_SYSTEM_PROMPT });
+      console.log("\nJarvis: Session memory cleared (todos/reminders stay saved).\n");
+      return loop();
+    }
+
+    // 1) Direct command match
+    const direct = matchCommand(input);
+    if (direct) {
+      const out = await runCommand(direct.cmd, input);
+      console.log(out);
+      return loop();
+    }
+
+    // 2) AI routing
+    const routed = await routeNaturalLanguage(input);
+    if (routed.commandId && routed.commandId !== "none") {
+      const cmd = COMMANDS.find((c) => c.id === routed.commandId);
+      if (cmd) {
+        try {
+          const result = await cmd.run(routed.args || {});
+          console.log(`\nJarvis: ${result}\n`);
+          return loop();
+        } catch (err) {
+          console.log(`\nJarvis: Command failed.\n${String(err.message || err)}\n`);
+          return loop();
+        }
+      }
+    }
+
+    // 3) Normal chat
+    await chatWithJarvis(input);
+    loop();
+  });
+}
+
+loop();
+
+-projects.js
+
+import fs from "fs";
+import path from "path";
+
+/**
+ * Scan a root folder and return:
+ *  - map: { "<lowercase folder name>": "/full/path/to/folder", ... }
+ *  - aliases: extra short keys you want ("poker", "jarvis", etc.)
+ */
+export function buildProjectsMap(rootDir) {
+  const map = {};
+  if (!fs.existsSync(rootDir)) return map;
+
+  const entries = fs.readdirSync(rootDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+
+    const folderName = entry.name;
+    const key = folderName.toLowerCase();
+    const fullPath = path.join(rootDir, folderName);
+
+    map[key] = fullPath;
+
+    // Friendly aliases (edit these however you want)
+    if (key.includes("poker") || key.includes("lobby")) map["poker"] = fullPath;
+    if (key.includes("jarvis")) map["jarvis"] = fullPath;
+    if (key.includes("burner") || key.includes("journal")) map["journal"] = fullPath;
+  }
+
+  return map;
+}
+
+
+-scheduler.js 
+
+export function createScheduler({ getState, persist }) {
+    const reminderTimers = new Map();
+  
+    function formatWhen(ts) {
+      return new Date(ts).toLocaleString();
+    }
+  
+    function scheduleReminder(rem) {
+      if (rem.fired) return;
+  
+      const delay = rem.dueAt - Date.now();
+      if (delay <= 0) return; // overdue (still listed)
+  
+      if (reminderTimers.has(rem.id)) return;
+  
+      const t = setTimeout(() => {
+        rem.fired = true;
+        persist();
+  
+        process.stdout.write(
+          `\n\n⏰ REMINDER: ${rem.text}\n(Was set for ${formatWhen(rem.dueAt)})\n\n`
+        );
+        process.stdout.write("\x07");
+  
+        reminderTimers.delete(rem.id);
+      }, delay);
+  
+      reminderTimers.set(rem.id, t);
+    }
+  
+    function scheduleAllReminders() {
+      const state = getState();
+      for (const r of state.reminders) scheduleReminder(r);
+    }
+  
+    function cancelReminderById(id) {
+      if (reminderTimers.has(id)) {
+        clearTimeout(reminderTimers.get(id));
+        reminderTimers.delete(id);
+      }
+    }
+  
+    return {
+      formatWhen,
+      scheduleReminder,
+      scheduleAllReminders,
+      cancelReminderById,
+    };
+  }
+  
+
+-state.js
+
+import fs from "fs";
+import path from "path";
+
+export function ensureDataDir(dataDir) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+export function defaultState() {
+  return {
+    version: 1,
+    createdAt: Date.now(),
+    todos: [],      // { id, text, done, createdAt, doneAt }
+    reminders: [],  // { id, text, dueAt, createdAt, fired, repeat? }
+  };
+}
+
+export function loadState(statePath) {
+  try {
+    if (!fs.existsSync(statePath)) {
+      const s = defaultState();
+      fs.writeFileSync(statePath, JSON.stringify(s, null, 2), "utf-8");
+      return s;
+    }
+    const raw = fs.readFileSync(statePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    return { ...defaultState(), ...parsed };
+  } catch {
+    // If file is corrupted, backup and reset
+    try {
+      fs.copyFileSync(statePath, statePath + `.backup_${Date.now()}`);
+    } catch {}
+    const s = defaultState();
+    fs.writeFileSync(statePath, JSON.stringify(s, null, 2), "utf-8");
+    return s;
+  }
+}
+
+export function saveState(statePath, state) {
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf-8");
+}
+
+export function nextId(prefix) {
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+}
+
+-test-ai.js
+
+import dotenv from "dotenv";
+import OpenAI from "openai";
+import readline from "readline";
+import { exec } from "child_process";
+import os from "os";
+import fs from "fs";
+import path from "path";
+import * as chrono from "chrono-node"
+
+dotenv.config();
+
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+/* =========================
+   CONFIG
+   ========================= */
+
+// 🔥 Set this to your All Projects folder (the same path you already fixed earlier)
+const PROJECTS_ROOT = "/Users/newowner/Desktop/All Projects";
+
+// Persistent state file (todos + reminders)
+const DATA_DIR = path.join(process.cwd(), "data");
+const STATE_PATH = path.join(DATA_DIR, "jarvis_state.json");
+
+// Make sure data dir exists
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+/* =========================
+   PROJECT AUTO-DETECT
+   ========================= */
+
+function buildProjectsMap(rootDir) {
+  const map = {};
+  if (!fs.existsSync(rootDir)) return map;
+
+  const entries = fs.readdirSync(rootDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const folderName = entry.name;
+    const key = folderName.toLowerCase();
+    const fullPath = path.join(rootDir, folderName);
+
+    map[key] = fullPath;
+
+    // Friendly aliases (customize as you want)
+    if (key.includes("poker") || key.includes("lobby")) map["poker"] = fullPath;
+    if (key.includes("jarvis")) map["jarvis"] = fullPath;
+    if (key.includes("burner") || key.includes("journal")) map["journal"] = fullPath;
+  }
+
+  return map;
+}
+
+let PROJECTS = buildProjectsMap(PROJECTS_ROOT);
+
+/* =========================
+   PERSISTENT STATE
+   ========================= */
+
+function defaultState() {
+  return {
+    version: 1,
+    createdAt: Date.now(),
+    todos: [],      // { id, text, done, createdAt, doneAt }
+    reminders: [],  // { id, text, dueAt, createdAt, fired }
+  };
+}
+
+function loadState() {
+  try {
+    if (!fs.existsSync(STATE_PATH)) {
+      const s = defaultState();
+      fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2), "utf-8");
+      return s;
+    }
+    const raw = fs.readFileSync(STATE_PATH, "utf-8");
+    const parsed = JSON.parse(raw);
+    return { ...defaultState(), ...parsed };
+  } catch {
+    // If file is corrupted, start fresh (but keep a backup)
+    try {
+      fs.copyFileSync(STATE_PATH, STATE_PATH + `.backup_${Date.now()}`);
+    } catch {}
+    const s = defaultState();
+    fs.writeFileSync(STATE_PATH, JSON.stringify(s, null, 2), "utf-8");
+    return s;
+  }
+}
+
+function saveState() {
+  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), "utf-8");
+}
+
+function nextId(prefix) {
+  return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+}
+
+let state = loadState();
+
+/* =========================
+   REMINDER SCHEDULER
+   ========================= */
+
+const reminderTimers = new Map(); // id -> timeout
+
+function formatWhen(ts) {
+  return new Date(ts).toLocaleString();
+}
+
+function isWeekday(d) {
+  const day = d.getDay(); // 0=Sun..6=Sat
+  return day >= 1 && day <= 5;
+}
+
+function setTimeOnDate(baseDate, hh, mm) {
+  const d = new Date(baseDate);
+  d.setHours(hh, mm, 0, 0);
+  return d;
+}
+
+// repeat = { type: "daily" | "weekdays" | "weekly", timeHH: number, timeMM: number, weekday?: number }
+// weekday: 0=Sun..6=Sat (for weekly)
+function computeNextDueAt(repeat, fromMs) {
+  const from = new Date(fromMs);
+
+  if (repeat.type === "daily") {
+    let candidate = setTimeOnDate(from, repeat.timeHH, repeat.timeMM);
+    if (candidate.getTime() <= fromMs) {
+      candidate.setDate(candidate.getDate() + 1);
+    }
+    return candidate.getTime();
+  }
+
+  if (repeat.type === "weekdays") {
+    let candidate = setTimeOnDate(from, repeat.timeHH, repeat.timeMM);
+
+    // if already passed today, start from tomorrow
+    if (candidate.getTime() <= fromMs) candidate.setDate(candidate.getDate() + 1);
+
+    // move forward until weekday
+    while (!isWeekday(candidate)) {
+      candidate.setDate(candidate.getDate() + 1);
+      candidate = setTimeOnDate(candidate, repeat.timeHH, repeat.timeMM);
+    }
+    return candidate.getTime();
+  }
+
+  if (repeat.type === "weekly") {
+    // next occurrence on repeat.weekday at time
+    const targetDow = repeat.weekday; // 0..6
+    let candidate = setTimeOnDate(from, repeat.timeHH, repeat.timeMM);
+
+    const currentDow = candidate.getDay();
+    let delta = targetDow - currentDow;
+    if (delta < 0) delta += 7;
+
+    // if today is the day but time passed, go next week
+    if (delta === 0 && candidate.getTime() <= fromMs) delta = 7;
+
+    candidate.setDate(candidate.getDate() + delta);
+    candidate = setTimeOnDate(candidate, repeat.timeHH, repeat.timeMM);
+    return candidate.getTime();
+  }
+
+  return null;
+}
+
+function repeatLabel(r) {
+  if (!r.repeat) return "";
+  const hh = String(r.repeat.timeHH).padStart(2, "0");
+  const mm = String(r.repeat.timeMM).padStart(2, "0");
+  if (r.repeat.type === "daily") return ` (repeats daily @ ${hh}:${mm})`;
+  if (r.repeat.type === "weekdays") return ` (repeats weekdays @ ${hh}:${mm})`;
+  if (r.repeat.type === "weekly") {
+    const names = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    return ` (repeats weekly ${names[r.repeat.weekday]} @ ${hh}:${mm})`;
+  }
+  return "";
+}
+
+
+function scheduleReminder(rem) {
+  // Already fired? Don't schedule.
+  if (rem.fired) return;
+
+  const delay = rem.dueAt - Date.now();
+
+  // Due in the past: leave it as not-fired, but mark as overdue (we’ll show it in reminders list)
+  if (delay <= 0) return;
+
+  // Prevent double scheduling
+  if (reminderTimers.has(rem.id)) return;
+
+  const t = setTimeout(() => {
+    // Print notification
+process.stdout.write(
+  `\n\n⏰ REMINDER: ${rem.text}${repeatLabel(rem)}\n(Was set for ${formatWhen(rem.dueAt)})\n\n`
+);
+process.stdout.write("\x07");
+
+// If recurring, compute next due time and reschedule.
+// If one-shot, mark fired.
+if (rem.repeat) {
+  const next = computeNextDueAt(rem.repeat, Date.now());
+  if (next) {
+    rem.dueAt = next;
+    rem.fired = false; // keep it active
+    saveState();
+
+    reminderTimers.delete(rem.id);
+    scheduleReminder(rem);
+    return;
+  }
+}
+
+// one-shot fallback
+rem.fired = true;
+saveState();
+reminderTimers.delete(rem.id);
+
+  }, delay);
+
+  reminderTimers.set(rem.id, t);
+}
+
+function scheduleAllReminders() {
+  for (const r of state.reminders) scheduleReminder(r);
+}
+
+scheduleAllReminders();
+
+/* =========================
+   PERSONALITY + CHAT MEMORY (session)
+   ========================= */
+
+const JARVIS_SYSTEM_PROMPT = `
+You are Jarvis: a calm, clever, efficient personal assistant.
+Rules:
+- Keep responses concise by default.
+- Prefer using commands when user intent is actionable (projects, reminders, todos).
+- Never claim you did something unless the command framework actually did it.
+- If asked for unsafe/illegal actions, refuse and offer safer alternatives.
+`;
+
+const chatHistory = [{ role: "system", content: JARVIS_SYSTEM_PROMPT }];
+
+/* =========================
+   SHELL HELPERS
+   ========================= */
+
+function runShell(cmd) {
+  return new Promise((resolve, reject) => {
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) return reject(new Error((stderr || error.message || "").trim()));
+      resolve((stdout || stderr || "").trim());
+    });
+  });
+}
+
+function openPath(targetPath) {
+  const platform = os.platform();
+  const quoted = `"${targetPath}"`;
+  if (platform === "darwin") return runShell(`open ${quoted}`);
+  if (platform === "win32") return runShell(`start "" ${quoted}`);
+  return runShell(`xdg-open ${quoted}`);
+}
+
+function nowString() {
+  return new Date().toLocaleString();
+}
+
+/* =========================
+   COMMAND UTILITIES
+   ========================= */
+
+function normalize(s) {
+  return s.trim().toLowerCase();
+}
+
+function tokenize(raw) {
+  return normalize(raw).split(/\s+/).filter(Boolean);
+}
+
+function parseMinutes(str) {
+  const n = Number(str);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.round(n);
+}
+
+function parseDateTimeLocal(raw) {
+  // Supports:
+  //  - "2026-01-09 18:30"
+  //  - "2026-01-09T18:30"
+  // Returns ms timestamp or null
+  const s = raw.trim().replace("T", " ");
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const [_, Y, Mo, D, H, Mi] = m;
+  const dt = new Date(
+    Number(Y),
+    Number(Mo) - 1,
+    Number(D),
+    Number(H),
+    Number(Mi),
+    0,
+    0
+  );
+  const ms = dt.getTime();
+  if (Number.isNaN(ms)) return null;
+  return ms;
+}
+
+function listTodos() {
+  if (state.todos.length === 0) return "No todos yet.";
+  const lines = state.todos
+    .slice()
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((t, i) => {
+      const status = t.done ? "✅" : "⬜️";
+      return `${i + 1}. ${status} ${t.text}`;
+    });
+  return lines.join("\n");
+}
+
+function listReminders() {
+  if (state.reminders.length === 0) return "No reminders yet.";
+  const lines = state.reminders
+    .slice()
+    .sort((a, b) => a.dueAt - b.dueAt)
+    .map((r, i) => {
+      const overdue = !r.fired && r.dueAt <= Date.now();
+      const status = r.fired ? "✅ fired" : overdue ? "⚠️ overdue" : "⏳ pending";
+      return `${i + 1}. [${status}] ${r.text}${repeatLabel(r)} — ${formatWhen(r.dueAt)}`;
+
+    });
+  return lines.join("\n");
+}
+
+function parseNaturalDateTime(text) {
+  // chrono parses things like:
+  // "tomorrow at 9am", "next friday 3pm", "in 2 hours", "jan 12 6:30pm"
+  const results = chrono.parse(text, new Date(), { forwardDate: true });
+  if (!results || results.length === 0) return null;
+
+  const dt = results[0].start.date();
+  const ms = dt.getTime();
+  if (Number.isNaN(ms)) return null;
+
+  return { dueAt: ms, parsedText: results[0].text };
+}
+
+
+/* =========================
+   COMMANDS (ALLOWLIST)
+   ========================= */
+
+const COMMANDS = [
+  
+  {
+    id: "remind_weekly",
+    names: ["remind weekly"],
+    description: "Set a weekly reminder (usage: remind weekly <day> HH:MM <text>)",
+    parseArgs: (tokens, raw) => {
+      // remind weekly fri 17:00 trash
+      const stripped = raw.replace(/^remind weekly\s+/i, "").trim();
+      const parts = stripped.split(/\s+/);
+      const dayStr = (parts[0] || "").toLowerCase();
+      const timePart = parts[1] || "";
+      const text = parts.slice(2).join(" ").trim();
+  
+      const dayMap = {
+        sun: 0, sunday: 0,
+        mon: 1, monday: 1,
+        tue: 2, tues: 2, tuesday: 2,
+        wed: 3, wednesday: 3,
+        thu: 4, thur: 4, thurs: 4, thursday: 4,
+        fri: 5, friday: 5,
+        sat: 6, saturday: 6,
+      };
+  
+      const weekday = dayMap[dayStr];
+      const m = timePart.match(/^(\d{2}):(\d{2})$/);
+      if (weekday === undefined || !m) return { ok: false };
+  
+      return { ok: true, weekday, hh: Number(m[1]), mm: Number(m[2]), text };
+    },
+    run: async ({ ok, weekday, hh, mm, text }) => {
+      if (!ok) return `Bad format. Example: remind weekly fri 17:00 take out trash`;
+      if (!text) return `Missing text. Example: remind weekly fri 17:00 take out trash`;
+  
+      const repeat = { type: "weekly", weekday, timeHH: hh, timeMM: mm };
+      const dueAt = computeNextDueAt(repeat, Date.now());
+  
+      const rem = {
+        id: nextId("rem"),
+        text,
+        dueAt,
+        createdAt: Date.now(),
+        fired: false,
+        repeat,
+      };
+  
+      state.reminders.push(rem);
+      saveState();
+      scheduleReminder(rem);
+  
+      return `Weekly reminder set for ${formatWhen(dueAt)}: "${text}"`;
+    },
+  },
+  
+
+  {
+    id: "remind_weekdays",
+    names: ["remind weekdays"],
+    description: "Set a weekday reminder (usage: remind weekdays HH:MM <text>)",
+    parseArgs: (tokens, raw) => {
+      const stripped = raw.replace(/^remind weekdays\s+/i, "").trim();
+      const timePart = stripped.slice(0, 5);
+      const text = stripped.slice(5).trim();
+      const m = timePart.match(/^(\d{2}):(\d{2})$/);
+      if (!m) return { ok: false };
+      return { ok: true, hh: Number(m[1]), mm: Number(m[2]), text };
+    },
+    run: async ({ ok, hh, mm, text }) => {
+      if (!ok) return `Bad format. Example: remind weekdays 08:30 go to gym`;
+      if (!text) return `Missing text. Example: remind weekdays 08:30 go to gym`;
+  
+      const repeat = { type: "weekdays", timeHH: hh, timeMM: mm };
+      const dueAt = computeNextDueAt(repeat, Date.now());
+  
+      const rem = {
+        id: nextId("rem"),
+        text,
+        dueAt,
+        createdAt: Date.now(),
+        fired: false,
+        repeat,
+      };
+  
+      state.reminders.push(rem);
+      saveState();
+      scheduleReminder(rem);
+  
+      return `Weekday reminder set for ${formatWhen(dueAt)}: "${text}"`;
+    },
+  },
+  
+
+  {
+    id: "remind_daily",
+    names: ["remind daily"],
+    description: "Set a daily reminder (usage: remind daily HH:MM <text>)",
+    parseArgs: (tokens, raw) => {
+      const stripped = raw.replace(/^remind daily\s+/i, "").trim();
+      const timePart = stripped.slice(0, 5);
+      const text = stripped.slice(5).trim();
+      const m = timePart.match(/^(\d{2}):(\d{2})$/);
+      if (!m) return { ok: false };
+      return { ok: true, hh: Number(m[1]), mm: Number(m[2]), text };
+    },
+    run: async ({ ok, hh, mm, text }) => {
+      if (!ok) return `Bad format. Example: remind daily 09:00 take meds`;
+      if (!text) return `Missing text. Example: remind daily 09:00 take meds`;
+  
+      const repeat = { type: "daily", timeHH: hh, timeMM: mm };
+      const dueAt = computeNextDueAt(repeat, Date.now());
+  
+      const rem = {
+        id: nextId("rem"),
+        text,
+        dueAt,
+        createdAt: Date.now(),
+        fired: false,
+        repeat,
+      };
+  
+      state.reminders.push(rem);
+      saveState();
+      scheduleReminder(rem);
+  
+      return `Daily reminder set for ${formatWhen(dueAt)}: "${text}"`;
+    },
+  },
+  
+
+  {
+    id: "remind",
+    names: ["remind", "reminder"],
+    description: `Set a reminder using natural language (examples: remind me tomorrow 9am to call mom)`,
+    parseArgs: (tokens, raw) => {
+      // Examples:
+      // "remind me tomorrow at 9am to call mom"
+      // "remind tomorrow 9am call mom"
+      // We'll let chrono find the time in the sentence, and use the remaining text as the reminder.
+  
+      const stripped = raw.replace(/^remind(er)?\s+/i, "").replace(/^me\s+/i, "").trim();
+      return { rawText: stripped };
+    },
+    run: async ({ rawText }) => {
+      if (!rawText) return `Example: remind me tomorrow at 9am to call mom`;
+  
+      const parsed = parseNaturalDateTime(rawText);
+      if (!parsed) {
+        return `I couldn't understand the time. Try: "tomorrow 9am", "in 2 hours", "next Friday 3pm"`;
+      }
+  
+      const { dueAt, parsedText } = parsed;
+  
+      // Remove the parsed time phrase from the reminder text
+      let reminderText = rawText.replace(parsedText, "").trim();
+  
+      // Clean up common filler words
+      reminderText = reminderText.replace(/^to\s+/i, "").trim();
+  
+      if (!reminderText) reminderText = "Reminder";
+  
+      const rem = {
+        id: nextId("rem"),
+        text: reminderText,
+        dueAt,
+        createdAt: Date.now(),
+        fired: false,
+      };
+  
+      state.reminders.push(rem);
+      saveState();
+      scheduleReminder(rem);
+  
+      return `Reminder set for ${formatWhen(dueAt)}: "${reminderText}"`;
+    },
+  },
+  
+
+  {
+    id: "todo_edit",
+    names: ["todo edit", "edit todo"],
+    description: "Edit a todo's text (usage: todo edit <number> <new text>)",
+    parseArgs: (tokens, raw) => {
+      // raw: "todo edit 2 new text here"
+      // or:  "edit todo 2 new text here"
+  
+      // Strip the command prefix
+      let stripped = raw.replace(/^todo edit\s+/i, "").trim();
+      stripped = stripped.replace(/^edit todo\s+/i, "").trim();
+  
+      // First token should be the number
+      const firstSpace = stripped.indexOf(" ");
+      if (firstSpace === -1) return { index: null, text: "" };
+  
+      const indexStr = stripped.slice(0, firstSpace).trim();
+      const text = stripped.slice(firstSpace + 1).trim();
+  
+      const index = Number(indexStr);
+      return { index: Number.isFinite(index) ? index : null, text };
+    },
+    run: async ({ index, text }) => {
+      if (!index || index <= 0) return `Give a todo number. Example: todo edit 2 new text`;
+      if (!text) return `Missing new text. Example: todo edit 2 buy milk`;
+  
+      // Same ordering as "todos" (createdAt)
+      const ordered = state.todos.slice().sort((a, b) => a.createdAt - b.createdAt);
+      const t = ordered[index - 1];
+      if (!t) return `Todo #${index} not found.`;
+  
+      const real = state.todos.find((x) => x.id === t.id);
+      if (!real) return `Todo #${index} not found.`;
+  
+      const old = real.text;
+      real.text = text;
+      saveState();
+  
+      return `Updated todo #${index}:\n- Before: "${old}"\n- After:  "${text}"`;
+    },
+  },
+  
+
+  {
+    id: "todo_delete",
+    names: ["todo delete", "delete todo", "todo remove", "remove todo"],
+    description: "Delete a todo by number (usage: todo delete <number>)",
+    parseArgs: (tokens) => {
+      const n = Number(tokens[tokens.length - 1]);
+      return { index: Number.isFinite(n) ? n : null };
+    },
+    run: async ({ index }) => {
+      if (!index || index <= 0) return `Give a todo number. Example: todo delete 2`;
+  
+      // Must match the same ordering as your "todos" list (createdAt order)
+      const ordered = state.todos.slice().sort((a, b) => a.createdAt - b.createdAt);
+      const t = ordered[index - 1];
+      if (!t) return `Todo #${index} not found.`;
+  
+      state.todos = state.todos.filter((x) => x.id !== t.id);
+      saveState();
+  
+      return `Deleted todo: "${t.text}"`;
+    },
+  },
+  
+
+  {
+    id: "help",
+    names: ["help", "?", "commands"],
+    description: "Show available commands",
+    parseArgs: () => ({}),
+    run: async () => {
+      const lines = COMMANDS.map((c) => `- ${c.names[0]}: ${c.description}`);
+      return `Available commands:\n${lines.join("\n")}\n\nSpecial: exit, reset`;
+    },
+  },
+  {
+    id: "projects",
+    names: ["projects", "list projects"],
+    description: "List detected projects from PROJECTS_ROOT",
+    parseArgs: () => ({}),
+    run: async () => {
+      PROJECTS = buildProjectsMap(PROJECTS_ROOT);
+      const keys = Object.keys(PROJECTS).sort();
+      if (keys.length === 0) return `No projects found.\nCheck PROJECTS_ROOT:\n${PROJECTS_ROOT}`;
+      return `Detected projects:\n- ${keys.join("\n- ")}`;
+    },
+  },
+  {
+    id: "time",
+    names: ["time", "date", "now"],
+    description: "Print current date/time",
+    parseArgs: () => ({}),
+    run: async () => `It is ${nowString()}.`,
+  },
+
+  // ---------- TODOS ----------
+  {
+    id: "todo_done_text",
+    names: ["todo done text"],
+    description: "Mark a todo done by matching text (internal)",
+    parseArgs: (tokens, raw) => {
+      const text = raw.replace(/^todo done text\s+/i, "").trim();
+      return { text };
+    },
+    run: async ({ text }) => {
+      if (!text) return `Tell me which todo to mark done. Example: "mark the poker todo done"`;
+  
+      // Find best match (simple contains match)
+      const needle = text.toLowerCase();
+      const match = state.todos.find(t => !t.done && t.text.toLowerCase().includes(needle));
+  
+      if (!match) return `I couldn't find an unfinished todo matching: "${text}". Try "todos" to view them.`;
+  
+      match.done = true;
+      match.doneAt = Date.now();
+      saveState();
+  
+      return `Marked done: "${match.text}"`;
+    },
+  },
+  {
+    id: "todo_delete_text",
+    names: ["todo delete text"],
+    description: "Delete a todo by matching text (internal)",
+    parseArgs: (tokens, raw) => {
+      const text = raw.replace(/^todo delete text\s+/i, "").trim();
+      return { text };
+    },
+    run: async ({ text }) => {
+      if (!text) return `Tell me which todo to delete. Example: "delete the poker todo"`;
+  
+      const needle = text.toLowerCase();
+      const match = state.todos.find(t => t.text.toLowerCase().includes(needle));
+  
+      if (!match) return `I couldn't find a todo matching: "${text}". Try "todos" to view them.`;
+  
+      state.todos = state.todos.filter(t => t.id !== match.id);
+      saveState();
+  
+      return `Deleted todo: "${match.text}"`;
+    },
+  },
+  
+  {
+    id: "todo_add",
+    names: ["todo add", "add todo"],
+    description: `Add a todo (usage: todo add <text>)`,
+    parseArgs: (tokens, raw) => {
+      const text = raw.replace(/^todo add\s+/i, "").replace(/^add todo\s+/i, "").trim();
+      return { text };
+    },
+    run: async ({ text }) => {
+      if (!text) return `Missing todo text. Example: todo add apply for jobs`;
+
+      const todo = {
+        id: nextId("todo"),
+        text,
+        done: false,
+        createdAt: Date.now(),
+        doneAt: null,
+      };
+      state.todos.push(todo);
+      saveState();
+      return `Added todo: "${text}"`;
+    },
+  },
+  {
+    id: "todos",
+    names: ["todos", "todo list"],
+    description: "List todos",
+    parseArgs: () => ({}),
+    run: async () => listTodos(),
+  },
+  {
+    id: "todo_done",
+    names: ["todo done", "done todo", "todo complete"],
+    description: `Mark a todo done (usage: todo done <number>)`,
+    parseArgs: (tokens, raw) => {
+      const n = Number(tokens[tokens.length - 1]);
+      return { index: Number.isFinite(n) ? n : null };
+    },
+    run: async ({ index }) => {
+      if (!index || index <= 0) return `Give a todo number. Example: todo done 1`;
+
+      const openTodos = state.todos.slice().sort((a, b) => a.createdAt - b.createdAt);
+      const t = openTodos[index - 1];
+      if (!t) return `Todo #${index} not found.`;
+
+      const real = state.todos.find((x) => x.id === t.id);
+      if (!real) return `Todo #${index} not found.`;
+
+      real.done = true;
+      real.doneAt = Date.now();
+      saveState();
+      return `Marked done: "${real.text}"`;
+    },
+  },
+  {
+    id: "todo_clear_done",
+    names: ["todo clear done", "clear done"],
+    description: "Remove completed todos",
+    parseArgs: () => ({}),
+    run: async () => {
+      const before = state.todos.length;
+      state.todos = state.todos.filter((t) => !t.done);
+      const after = state.todos.length;
+      saveState();
+      return `Cleared ${before - after} completed todo(s).`;
+    },
+  },
+  {
+    id: "todo_clear_all",
+    names: ["todo clear all", "clear todos"],
+    description: "Delete ALL todos (dangerous)",
+    parseArgs: () => ({}),
+    run: async () => {
+      const count = state.todos.length;
+      if (count === 0) return "Todo list already empty.";
+  
+      // extra safety: require a confirmation token
+      // user must type: "clear todos confirm"
+      return `To clear ALL ${count} todos, type: clear todos confirm`;
+    },
+  },
+  {
+    id: "todo_clear_all_confirm",
+    names: ["clear todos confirm", "todo clear all confirm"],
+    description: "Confirm delete ALL todos",
+    parseArgs: () => ({}),
+    run: async () => {
+      const count = state.todos.length;
+      if (count === 0) return "Todo list already empty.";
+  
+      state.todos = [];
+      saveState();
+      return `Cleared all ${count} todos.`;
+    },
+  },
+  
+  {
+    id: "todo_clear_all",
+    names: ["todo clear all", "clear todos"],
+    description: "Delete ALL todos (dangerous)",
+    parseArgs: () => ({}),
+    run: async () => {
+      const count = state.todos.length;
+      if (count === 0) return "Todo list already empty.";
+  
+      state.todos = [];
+      saveState();
+      return `Cleared all ${count} todos.`;
+    },
+  },
+  
+  // ---------- REMINDERS ----------
+  {
+    id: "remind_in",
+    names: ["remind in"],
+    description: `Set a reminder in N minutes (usage: remind in <minutes> <text>)`,
+    parseArgs: (tokens, raw) => {
+      // raw: "remind in 20 take pizza out"
+      const parts = raw.trim().split(/\s+/);
+      const minutes = parseMinutes(parts[2]); // ["remind","in","20",...]
+      const text = parts.slice(3).join(" ").trim();
+      return { minutes, text };
+    },
+    run: async ({ minutes, text }) => {
+      if (!minutes) return `Missing minutes. Example: remind in 20 take pizza out`;
+      if (!text) return `Missing reminder text. Example: remind in 20 take pizza out`;
+
+      const rem = {
+        id: nextId("rem"),
+        text,
+        dueAt: Date.now() + minutes * 60 * 1000,
+        createdAt: Date.now(),
+        fired: false,
+      };
+
+      state.reminders.push(rem);
+      saveState();
+      scheduleReminder(rem);
+
+      return `Reminder set for ${minutes} minute(s) from now: "${text}"`;
+    },
+  },
+  {
+    id: "remind_at",
+    names: ["remind at"],
+    description: `Set a reminder at a date/time (usage: remind at YYYY-MM-DD HH:MM <text>)`,
+    parseArgs: (tokens, raw) => {
+      // raw: "remind at 2026-01-10 09:00 call mom"
+      const stripped = raw.replace(/^remind at\s+/i, "").trim();
+      // take first 16 chars like "YYYY-MM-DD HH:MM"
+      const whenPart = stripped.slice(0, 16);
+      const text = stripped.slice(16).trim();
+      const dueAt = parseDateTimeLocal(whenPart);
+      return { dueAt, whenPart, text };
+    },
+    run: async ({ dueAt, whenPart, text }) => {
+      if (!dueAt) return `Bad time format. Use: remind at 2026-01-10 09:00 call mom`;
+      if (!text) return `Missing reminder text. Example: remind at 2026-01-10 09:00 call mom`;
+
+      const rem = {
+        id: nextId("rem"),
+        text,
+        dueAt,
+        createdAt: Date.now(),
+        fired: false,
+      };
+
+      state.reminders.push(rem);
+      saveState();
+      scheduleReminder(rem);
+
+      return `Reminder set for ${formatWhen(dueAt)}: "${text}"`;
+    },
+  },
+  {
+    id: "reminders",
+    names: ["reminders", "list reminders"],
+    description: "List reminders",
+    parseArgs: () => ({}),
+    run: async () => listReminders(),
+  },
+  {
+    id: "reminder_delete",
+    names: ["reminder delete", "delete reminder"],
+    description: `Delete a reminder (usage: reminder delete <number>)`,
+    parseArgs: (tokens) => {
+      const n = Number(tokens[tokens.length - 1]);
+      return { index: Number.isFinite(n) ? n : null };
+    },
+    run: async ({ index }) => {
+      if (!index || index <= 0) return `Give a reminder number. Example: reminder delete 1`;
+
+      const sorted = state.reminders.slice().sort((a, b) => a.dueAt - b.dueAt);
+      const r = sorted[index - 1];
+      if (!r) return `Reminder #${index} not found.`;
+
+      // Clear any timer
+      if (reminderTimers.has(r.id)) {
+        clearTimeout(reminderTimers.get(r.id));
+        reminderTimers.delete(r.id);
+      }
+
+      state.reminders = state.reminders.filter((x) => x.id !== r.id);
+      saveState();
+
+      return `Deleted reminder: "${r.text}"`;
+    },
+  },
+
+  // ---------- PROJECT ACTIONS ----------
+  {
+    id: "open_project",
+    names: ["open", "open project", "o"],
+    description: "Open a project folder (usage: open <name>)",
+    parseArgs: (tokens) => ({ projectName: tokens[tokens.length - 1] }),
+    run: async ({ projectName }) => {
+      PROJECTS = buildProjectsMap(PROJECTS_ROOT);
+
+      const key = (projectName || "").toLowerCase();
+      const target = PROJECTS[key];
+
+      if (!target) return `Unknown project "${projectName}". Try "projects".`;
+
+      await openPath(target);
+      return `Opened project "${key}".`;
+    },
+  },
+  {
+    id: "code_project",
+    names: ["code", "code project"],
+    description: "Open a project in VS Code (usage: code <name>)",
+    parseArgs: (tokens) => ({ projectName: tokens[tokens.length - 1] }),
+    run: async ({ projectName }) => {
+      PROJECTS = buildProjectsMap(PROJECTS_ROOT);
+
+      const key = (projectName || "").toLowerCase();
+      const target = PROJECTS[key];
+
+      if (!target) return `Unknown project "${projectName}". Try "projects".`;
+
+      await runShell(`code "${target}"`);
+      return `Opened "${key}" in VS Code.`;
+    },
+  },
+];
+
+/* =========================
+   COMMAND MATCHING
+   ========================= */
+
+function matchCommand(raw) {
+  const text = normalize(raw);
+
+  // Longest alias first
+  const allAliases = COMMANDS.flatMap((c) => c.names.map((n) => ({ cmd: c, alias: n })))
+    .sort((a, b) => b.alias.length - a.alias.length);
+
+  for (const { cmd, alias } of allAliases) {
+    if (text === alias) return { cmd };
+    if (text.startsWith(alias + " ")) return { cmd };
+  }
+
+  return null;
+}
+
+/* =========================
+   AI ROUTER: Natural language → command
+   ========================= */
+
+async function routeNaturalLanguage(userText) {
+  // refresh projects list so the router sees the newest
+  PROJECTS = buildProjectsMap(PROJECTS_ROOT);
+
+  const commandSchema = COMMANDS.map((c) => {
+    let argsExample = {};
+  
+    if (c.id === "open_project") argsExample = { projectName: "jarvis" };
+    else if (c.id === "code_project") argsExample = { projectName: "jarvis" };
+    else if (c.id === "run_npm") argsExample = { projectName: "jarvis", script: "start" };
+  
+    // todos
+    else if (c.id === "todo_add") argsExample = { text: "apply for jobs" };
+    else if (c.id === "todos") argsExample = {};
+    else if (c.id === "todo_done") argsExample = { index: 2 };
+    else if (c.id === "todo_delete") argsExample = { index: 3 };
+    else if (c.id === "todo_edit") argsExample = { index: 2, text: "work on poker bug" };
+    else if (c.id === "todo_done_text") argsExample = { text: "poker" };
+    else if (c.id === "todo_delete_text") argsExample = { text: "jobs" };
+  
+    // reminders (keep your existing ones)
+    else if (c.id === "remind_in") argsExample = { minutes: 20, text: "take pizza out" };
+    else if (c.id === "remind_at") argsExample = { dueAt: Date.now() + 3600000, text: "call mom" };
+  
+    return {
+      id: c.id,
+      names: c.names,
+      description: c.description,
+      argsExample,
+    };
+  });
+  
+
+  const routerSystem = `
+  You are a command router for a local assistant.
+  Return ONLY valid JSON. No markdown.
+  
+  Pick the best command from the allowed list or "none".
+  
+  PROJECTS:
+  - Never invent project names beyond the provided list.
+  
+  TODOS:
+  - If user wants to add a todo: use commandId "todo_add" with {"text": "..."}
+  - If user asks to list todos: use commandId "todos"
+  - If user says "mark todo 2 done" or references a number: use "todo_done" with {"index": 2}
+  - If user says "delete todo 3": use "todo_delete" with {"index": 3}
+  - If user references a todo by words (no number), use:
+    - "todo_done_text" with {"text": "<keywords>"}
+    - "todo_delete_text" with {"text": "<keywords>"}
+  
+  REMINDERS:
+  - If user says "in X minutes": use "remind_in" with {"minutes": X, "text": "..."}
+  - If user gives a strict time format already supported: use existing reminder command.
+  - If the time is ambiguous and you can't be sure, return {"commandId":"none"}.
+  
+  If user asks to do something not covered, return {"commandId":"none"}.
+  `;
+  
+
+  const routerUser = {
+    userText,
+    availableProjects: Object.keys(PROJECTS),
+    commands: commandSchema,
+  };
+
+  const resp = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: routerSystem },
+      { role: "user", content: JSON.stringify(routerUser) },
+    ],
+  });
+
+  const raw = resp.choices[0].message.content.trim();
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return { commandId: "none" };
+    if (!parsed.commandId) return { commandId: "none" };
+    return parsed;
+  } catch {
+    return { commandId: "none" };
+  }
+}
+
+/* =========================
+   EXECUTION
+   ========================= */
+
+async function runCommand(cmd, raw) {
+  const tokens = tokenize(raw);
+  const args = cmd.parseArgs(tokens, raw);
+
+  try {
+    const out = await cmd.run(args);
+    return `\nJarvis: ${out}\n`;
+  } catch (err) {
+    return `\nJarvis: Command failed.\n${String(err.message || err)}\n`;
+  }
+}
+
+async function chatWithJarvis(userText) {
+  chatHistory.push({ role: "user", content: userText });
+
+  try {
+    const resp = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: chatHistory,
+    });
+
+    const reply = resp.choices[0].message.content;
+    chatHistory.push({ role: "assistant", content: reply });
+
+    console.log(`\nJarvis: ${reply}\n`);
+  } catch (err) {
+    console.error("Jarvis chat error:", err.message);
+    chatHistory.pop();
+  }
+}
+
+/* =========================
+   MAIN LOOP
+   ========================= */
+
+const rlInterface = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+console.log("Jarvis online (Step 9).");
+console.log("Try: projects | todos | todo add <text> | todo done <#> | reminders | remind in <min> <text>");
+console.log("Special: exit | reset\n");
+
+function loop() {
+  rlInterface.question("You: ", async (raw) => {
+    const input = raw.trim();
+    if (!input) return loop();
+
+    const low = input.toLowerCase();
+
+    if (low === "exit") {
+      console.log("Jarvis shutting down.");
+      rlInterface.close();
+      return;
+    }
+
+    if (low === "reset") {
+      chatHistory.length = 0;
+      chatHistory.push({ role: "system", content: JARVIS_SYSTEM_PROMPT });
+      console.log("\nJarvis: Session memory cleared (todos/reminders stay saved).\n");
+      return loop();
+    }
+
+    // 1) Direct commands (fast, no AI routing)
+    const direct = matchCommand(input);
+    if (direct) {
+      const out = await runCommand(direct.cmd, input);
+      console.log(out);
+      return loop();
+    }
+
+    // 2) AI routing (natural language → command)
+    const routed = await routeNaturalLanguage(input);
+    if (routed.commandId && routed.commandId !== "none") {
+      const cmd = COMMANDS.find((c) => c.id === routed.commandId);
+      if (cmd) {
+        try {
+          const result = await cmd.run(routed.args || {});
+          console.log(`\nJarvis: ${result}\n`);
+          return loop();
+        } catch (err) {
+          console.log(`\nJarvis: Command failed.\n${String(err.message || err)}\n`);
+          return loop();
+        }
+      }
+    }
+
+    // 3) Normal chat
+    await chatWithJarvis(input);
+    loop();
+  });
+}
+
+loop();
+
